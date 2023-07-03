@@ -12,6 +12,8 @@ from pprint import pprint
 from collections import Counter
 from os import listdir
 from os.path import isfile, join
+import gc
+from tqdm.auto import tqdm
 
 warnings.filterwarnings("ignore")
 
@@ -307,9 +309,11 @@ class PreprocessDataset:
         #print("All data files")
         #print(allDataFiles)
         #go over all csv files in the census data folder
-        for file in allDataFiles:
+        for file in tqdm(allDataFiles):
             # Note: psam_p51.csv file can be downloaded from https://www.census.gov/programs-surveys/acs/microdata/access.html
-            df = pd.read_csv(path+"/"+file)
+            gc.collect()
+            df = pd.read_csv(path+"/"+file) #.head(5000)
+            gc.collect()
             ''' to make a data set similar to Adult data set, filter rows such that 
                 df['AGEP'] > 16 && df['WKHP'] > 0, task : df['PINCP'] > 90k (inflation taken into account since 1996)
                 'PWGTP' should not be used for model training, its possibly for data sampling
@@ -317,13 +321,15 @@ class PreprocessDataset:
                 'PUMA' column is only for fine-grained geographical region, to be combined with 'ST' for denoting unique regions with at least 100,000 people
             '''
             df = df[['AGEP', 'COW', 'SCHL', 'MAR', 'RAC1P', 'SEX', 'DREM', 'DPHY', 'DEAR', 'DEYE', 'WKHP', 'WAOB', 'ST', 'PUMA', 'PINCP']]
-            df = df[df['AGEP'] > 16]
+            # df = df[df['AGEP'] > 16]
             df = df[df['WKHP'] > 0]
             for col in ['DREM', 'DPHY', 'DEAR', 'DEYE']:
                 df[col][df[col] == 2] = 0
             for col in ['SEX', 'COW', 'SCHL', 'MAR', 'RAC1P', 'WAOB']:
                 df[col] -= 1
             df = df.astype('int64')
+            # df = df.astype('Int64')  # keeps NaN          
+            gc.collect()
             #print(df)
             #print(df.isnull().any(axis=0))
             
@@ -339,43 +345,60 @@ class PreprocessDataset:
                 df_all = pd.concat([df_all, df])
             else:
                 df_all = df
+            df = None
+            gc.collect()
         #Remove unused keys for ST attribute (e.g. there is no state for value 3)
         unique_st = np.sort(df_all['ST'].unique())
         for old_val,new_val in zip(unique_st,list(range(len(unique_st)))):
             df_all['ST'][df_all['ST']==old_val] = new_val
 
         X = df_all.copy()
+        df_all = None
         X = self.parseConstraint(X)
-        
+        gc.collect()
+
         #this gets all the columns that needs to be dropped
         allColumns = self.parseX()
         # print(allColumns)
         if allColumns:
             X = X.drop(columns=allColumns)
+            gc.collect()
         # print(X)
         
         y = np.array(X['PINCP'])
-        y = np.where(y > args.high_income_threshold, 1, 0)
-        print('Number of records with Income > $90K: %d' % sum(X['PINCP'] > 90000))
+        y = np.where(y > args.high_income_threshold, ">90K", "<=90K")
+        X['PINCP'] = y
+        print(X.shape)
+        print(X.head(2))
+        X.to_csv('census_all.csv', index=False)
+        print('Number of records with Income > $90K: %d' % sum(X['PINCP'] == ">90K"))
+        
         # not removing PINCP as it may be used for data analysis, but should be dropped from training
         #X = X.drop(columns='PINCP')
         # creating the categorical attribute dictionary
+        attribute_replace_dict = {}
         attribute_dict = {}
         for col, desc in zip(['DREM', 'DPHY', 'DEAR', 'DEYE'], ['Cognitive Difficulty', 'Ambulatory Difficulty', 'Hearing Difficulty', 'Vision Difficulty']):
             if col not in allColumns:
                 attribute_dict[X.columns.get_loc(col)] = {0: 'No ' + desc, 1: desc}
+                attribute_replace_dict[col] = {0: 'No ' + desc, 1: desc}
         if 'SEX' not in allColumns:
             attribute_dict[X.columns.get_loc('SEX')] = {0: 'Male', 1: 'Female'}
+            attribute_replace_dict['SEX'] = {0: 'Male', 1: 'Female'}
         if 'COW' not in allColumns:
             attribute_dict[X.columns.get_loc('COW')] = {0: 'Private For-Profit', 1: 'Private Non-Profit', 2: 'Local Govt', 3: 'State Govt', 4: 'Federal Govt', 5: 'Self-Employed Other', 6: 'Self-Employed Own', 7: 'Unpaid Job', 8: 'Unemployed'}
+            attribute_replace_dict['COW'] = {0: 'Private For-Profit', 1: 'Private Non-Profit', 2: 'Local Govt', 3: 'State Govt', 4: 'Federal Govt', 5: 'Self-Employed Other', 6: 'Self-Employed Own', 7: 'Unpaid Job', 8: 'Unemployed'}
         if 'MAR' not in allColumns:
             attribute_dict[X.columns.get_loc('MAR')] = {0: 'Married', 1: 'Widowed', 2: 'Divorced', 3: 'Separated', 4: 'Never married'}
+            attribute_replace_dict['MAR'] = {0: 'Married', 1: 'Widowed', 2: 'Divorced', 3: 'Separated', 4: 'Never married'}
         if 'RAC1P' not in allColumns:
             attribute_dict[X.columns.get_loc('RAC1P')] = {0: 'White', 1: 'Black', 2: 'Native American', 3: 'Asian', 4: 'Pacific Islander', 5: 'Some Other Race', 6: 'Two or More Races'}
+            attribute_replace_dict['RAC1P'] = {0: 'White', 1: 'Black', 2: 'Native American', 3: 'Asian', 4: 'Pacific Islander', 5: 'Some Other Race', 6: 'Two or More Races'}
         if 'WAOB' not in allColumns:
             attribute_dict[X.columns.get_loc('WAOB')] = {0: 'US state', 1: 'PR and US Island Areas', 2: 'Latin America', 3: 'Asia', 4: 'Europe', 5: 'Africa', 6: 'Northern America', 7: 'Oceania and at Sea'}
+            attribute_replace_dict['WAOB'] = {0: 'US state', 1: 'PR and US Island Areas', 2: 'Latin America', 3: 'Asia', 4: 'Europe', 5: 'Africa', 6: 'Northern America', 7: 'Oceania and at Sea'}
         if 'ST' not in allColumns:
-            attribute_dict[X.columns.get_loc('ST')] = {
+            attribute_replace_dict['ST'] = attribute_dict[X.columns.get_loc('ST')] = {
                 0:'Alabama/AL',
                 1:'Alaska/AK',
                 2:'Arizona/AZ',
@@ -431,8 +454,12 @@ class PreprocessDataset:
                 }
         if 'SCHL' not in allColumns:
             attribute_dict[X.columns.get_loc('SCHL')] = {0: 'No schooling completed', 1: 'Nursery school, preschool', 2: 'Kindergarten', 3: 'Grade 1', 4: 'Grade 2', 5: 'Grade 3', 6: 'Grade 4', 7: 'Grade 5', 8: 'Grade 6', 9: 'Grade 7', 10: 'Grade 8', 11: 'Grade 9', 12: 'Grade 10', 13: 'Grade 11', 14: '12th grade - no diploma', 15: 'Regular high school diploma', 16: 'GED or alternative credential', 17: 'Some college, but less than 1 year', 18: '1 or more years of college credit, no degree', 19: 'Associates degree', 20: 'Bachelors degree', 21: 'Masters degree', 22: 'Professional degree beyond a bachelors degree', 23: 'Doctorate degree'}
+            attribute_replace_dict['SCHL'] = {0: 'No schooling completed', 1: 'Nursery school, preschool', 2: 'Kindergarten', 3: 'Grade 1', 4: 'Grade 2', 5: 'Grade 3', 6: 'Grade 4', 7: 'Grade 5', 8: 'Grade 6', 9: 'Grade 7', 10: 'Grade 8', 11: 'Grade 9', 12: 'Grade 10', 13: 'Grade 11', 14: '12th grade - no diploma', 15: 'Regular high school diploma', 16: 'GED or alternative credential', 17: 'Some college, but less than 1 year', 18: '1 or more years of college credit, no degree', 19: 'Associates degree', 20: 'Bachelors degree', 21: 'Masters degree', 22: 'Professional degree beyond a bachelors degree', 23: 'Doctorate degree'}
         attribute_idx = {col: X.columns.get_loc(col) for col in ['DREM', 'DPHY', 'DEAR', 'DEYE', 'SEX', 'COW', 'MAR', 'RAC1P', 'WAOB', 'SCHL', 'ST', 'PUMA', 'PINCP'] if col not in allColumns}
+        X.replace(attribute_replace_dict).to_csv('census_all_str.csv', index=False)
+        gc.collect()
         X = np.matrix(X)
+        gc.collect()
 
         max_attr_vals = np.max(X, axis=0)
         try:
@@ -559,7 +586,7 @@ class PreprocessDataset:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('dataset', type=str)
+    parser.add_argument('--dataset', type=str, default='census')
     parser.add_argument('--preprocess', type=int, default=0)
     parser.add_argument('--binarize', type=int, default=0)
     #this specifies the threshold for the high income class for y.
